@@ -113,6 +113,15 @@ bun test             # run tests (includes dcg integration tests if dcg is in PA
 bun run build        # compile to dist/
 ```
 
+## Acknowledgements
+
+This plugin builds on the work of two prior reference implementations:
+
+- [jms830/opencode-dcg-plugin](https://github.com/jms830/opencode-dcg-plugin) — the original OpenCode plugin for dcg by Jordan Stout.
+- [Alex Mikhalev's gist](https://gist.github.com/AlexMikhalev/bc7cc0f237bdb2a6fade347aba203acb) — a corrected variant that identified and fixed the hook-registration bug in the original, along with a helpful writeup of the OpenCode plugin API.
+
+Both provided the core integration pattern (spawning `dcg`, JSON parsing, throwing to block) that this plugin refines and extends with configurable fail-mode, timeouts, graceful dcg-not-found handling, and TypeScript types.
+
 ## License
 
 MIT
