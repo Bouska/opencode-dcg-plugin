@@ -11,12 +11,19 @@
  * respectively. When a command is denied, the `tool.execute.before` hook throws
  * an Error to abort the tool call.
  *
+ * Optionally, when the review agent is enabled (DCG_PLUGIN_REVIEW_ENABLED=true),
+ * a blocked command is sent to an OpenCode LLM subsession for a second opinion.
+ * If the LLM deems the command safe, the command is allowed for that single
+ * invocation only — the next run is re-checked by dcg from scratch. This uses
+ * OpenCode's own model infrastructure — no external API key required.
+ *
  * Rule/pack configuration (which commands are considered destructive) is managed
  * entirely by dcg itself via `~/.config/dcg/config.toml` or `.dcg.toml`. This
  * plugin only controls its own integration behavior (timeout, fail mode, tool
- * scope) via `DCG_PLUGIN_*` environment variables.
+ * scope, review agent) via `DCG_PLUGIN_*` environment variables.
  */
 import { spawn } from "node:child_process";
+import { reviewCommand } from "./review.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -48,19 +55,68 @@ export interface DcgPluginConfig {
   binary: string;
   /** When true, log dcg stderr and decision details to console.warn. */
   debug: boolean;
+  /** LLM review agent configuration (second-opinion override). */
+  review: ReviewConfig;
 }
 
-/** OpenCode plugin context (subset we care about). */
-export interface PluginContext {
-  project: unknown;
-  client: unknown;
-  $: unknown;
-  directory: string;
-  worktree: string;
+/** Configuration for the LLM review agent. */
+export interface ReviewConfig {
+  /** When true, blocked commands are sent to an LLM for review before throwing. */
+  enabled: boolean;
+  /** Model to use (format: { providerID, modelID }). If unset, uses the agent's default. */
+  model?: { providerID: string; modelID: string };
+  /** OpenCode agent to use for the review subsession (default: "general"). */
+  agent: string;
+  /** Timeout in ms for the LLM review (default: 60000). */
+  timeoutMs: number;
+}
+
+/** Result of an LLM review of a blocked command. */
+export interface ReviewResult {
+  approved: boolean;
+  reasoning?: string;
 }
 
 /** A function that checks a command and returns a dcg decision. */
 export type CheckFn = (command: string, config: DcgPluginConfig) => Promise<DcgDecision>;
+
+/** Minimal OpenCode client interface for session creation and prompting. */
+export interface OpencodeSessionClient {
+  session: {
+    create(options?: {
+      body?: { title?: string };
+    }): Promise<{ data?: { id?: string } }>;
+    prompt(options: {
+      path: { id: string };
+      body: {
+        agent?: string;
+        model?: { providerID: string; modelID: string };
+        system?: string;
+        parts: Array<{ type: "text"; text: string }>;
+      };
+      signal?: AbortSignal;
+    }): Promise<{
+      data?: { parts?: Array<{ type: string; text?: string }> };
+    }>;
+    messages(options: {
+      path: { id: string };
+      query?: { limit?: number };
+    }): Promise<{
+      data?: Array<{
+        info: { role: "user" | "assistant" };
+        parts: Array<{ type: string; text?: string; tool?: string }>;
+      }>;
+    }>;
+  };
+}
+
+/** A function that reviews a blocked command and returns approval + reasoning. */
+export type ReviewFn = (
+  command: string,
+  decision: DcgDecision,
+  config: DcgPluginConfig,
+  sessionID?: string,
+) => Promise<ReviewResult>;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -95,6 +151,16 @@ function envStr(env: EnvMap, name: string, fallback: string): string {
   return v !== undefined && v !== "" ? v : fallback;
 }
 
+/** Parse a "providerID:modelID" string into a model reference. */
+function parseModel(s: string): { providerID: string; modelID: string } | undefined {
+  const idx = s.indexOf(":");
+  if (idx < 0) return undefined;
+  const providerID = s.slice(0, idx).trim();
+  const modelID = s.slice(idx + 1).trim();
+  if (!providerID || !modelID) return undefined;
+  return { providerID, modelID };
+}
+
 /**
  * Load plugin config from environment variables.
  *
@@ -105,6 +171,10 @@ function envStr(env: EnvMap, name: string, fallback: string): string {
  *   DCG_PLUGIN_TOOLS     — comma-separated tool names (default "bash").
  *   DCG_PLUGIN_BINARY    — path/name of the dcg binary (default "dcg").
  *   DCG_PLUGIN_DEBUG     — "true"/"1" to log dcg stderr and decisions.
+ *   DCG_PLUGIN_REVIEW_ENABLED — "true"/"1" to enable LLM review of blocked commands.
+ *   DCG_PLUGIN_REVIEW_MODEL  — "providerID:modelID" (e.g., "anthropic:claude-sonnet-4").
+ *   DCG_PLUGIN_REVIEW_AGENT  — OpenCode agent for review subsession (default "general").
+ *   DCG_PLUGIN_REVIEW_TIMEOUT_MS — timeout for LLM review (default 60000).
  *
  * Note: dcg's own bypass (`DCG_BYPASS=1`) is handled by dcg itself — when set,
  * dcg returns "allow" and the plugin naturally lets the command through.
@@ -117,6 +187,12 @@ export function loadConfig(env: EnvMap = process.env): DcgPluginConfig {
     tools: envList(env, "DCG_PLUGIN_TOOLS", ["bash"]),
     binary: envStr(env, "DCG_PLUGIN_BINARY", "dcg"),
     debug: envBool(env, "DCG_PLUGIN_DEBUG", false),
+    review: {
+      enabled: envBool(env, "DCG_PLUGIN_REVIEW_ENABLED", false),
+      model: parseModel(envStr(env, "DCG_PLUGIN_REVIEW_MODEL", "")),
+      agent: envStr(env, "DCG_PLUGIN_REVIEW_AGENT", "general"),
+      timeoutMs: envInt(env, "DCG_PLUGIN_REVIEW_TIMEOUT_MS", 60000),
+    },
   };
 }
 
@@ -292,9 +368,11 @@ export function formatBlockMessage(command: string, d: DcgDecision): string {
 
 /**
  * Build the hook handlers for the given config + check function.
+ * If a review function is provided, blocked commands are sent for LLM review
+ * before throwing — if the reviewer approves, the command is allowed.
  * Exported for testing; use `DcgGuard` for the real plugin.
  */
-export async function createPlugin(config: DcgPluginConfig, check: CheckFn) {
+export async function createPlugin(config: DcgPluginConfig, check: CheckFn, review?: ReviewFn) {
   if (!config.enabled) return {};
 
   return {
@@ -308,7 +386,26 @@ export async function createPlugin(config: DcgPluginConfig, check: CheckFn) {
       if (typeof command !== "string" || command.trim() === "") return;
 
       const decision = await check(command, config);
-      if (decision.decision === "deny") {
+      if (decision && decision.decision === "deny") {
+        if (review) {
+          try {
+            const result = await review(command, decision, config, input.sessionID);
+            if (result.approved) {
+              if (config.debug) {
+                console.warn(
+                  `[opencode-dcg-plugin] command approved by review agent: ${command}` +
+                    (result.reasoning ? ` (${result.reasoning})` : ""),
+                );
+              }
+              return; // Allow this single invocation; next run is re-checked
+            }
+          } catch (err) {
+            if (config.debug) {
+              console.warn(`[opencode-dcg-plugin] review failed, blocking: ${errMsg(err)}`);
+            }
+            // Fall through to throw — safe default is to block
+          }
+        }
         throw new Error(formatBlockMessage(command, decision));
       }
     },
@@ -322,8 +419,35 @@ export async function createPlugin(config: DcgPluginConfig, check: CheckFn) {
  *   { "plugin": ["opencode-dcg-plugin"] }
  *
  * Or place the built file in `.opencode/plugins/`.
+ *
+ * When DCG_PLUGIN_REVIEW_ENABLED is true, blocked commands are sent to an
+ * OpenCode LLM subsession for a second opinion. If approved, the command is
+ * allowed for that single invocation only — the next run is re-checked by
+ * dcg and re-reviewed if blocked again.
  */
-export const DcgGuard = async (_context: PluginContext) => createPlugin(loadConfig(), runDcg);
+export const DcgGuard = async (context: {
+  project: unknown;
+  client: unknown;
+  $: unknown;
+  directory: string;
+  worktree: string;
+}) => {
+  const config = loadConfig();
+
+  const review: ReviewFn | undefined = config.review.enabled
+    ? (command, decision, cfg, sessionID) =>
+        reviewCommand(
+          context.client as OpencodeSessionClient,
+          command,
+          decision,
+          cfg,
+          context.directory,
+          sessionID,
+        )
+    : undefined;
+
+  return createPlugin(config, runDcg, review);
+};
 
 /**
  * OpenCode's plugin loader (v1.17+) expects a `default` export. Most

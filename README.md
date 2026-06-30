@@ -45,10 +45,11 @@ Build the plugin and copy the output into your `.opencode/plugins/` directory:
 git clone https://github.com/pablo/opencode-dcg-plugin
 cd opencode-dcg-plugin
 bun install && bun run build
-cp dist/index.js /path/to/project/.opencode/plugins/dcg-guard.js
+cp dist/index.js  /path/to/project/.opencode/plugins/dcg-guard.js
+cp dist/review.js /path/to/project/.opencode/plugins/review.js
 ```
 
-OpenCode auto-loads `.js`/`.ts` files placed in `.opencode/plugins/`.
+OpenCode auto-loads `.js`/`.ts` files placed in `.opencode/plugins/`. Both files are required: `index.js` imports `./review.js` for the optional LLM review feature. (OpenCode will also auto-load `review.js` as a separate plugin entry; it has no `default` export, so it is silently dropped — harmless.)
 
 ## How it works
 
@@ -93,6 +94,23 @@ The plugin reads its own behavior from environment variables (all optional):
 | `DCG_PLUGIN_BINARY` | `dcg` | Name or full path of the dcg binary. |
 | `DCG_PLUGIN_DEBUG` | `false` | Set to `true`/`1` to log dcg decisions and stderr to the console. |
 
+### LLM review agent (optional)
+
+When enabled, blocked commands are sent to an OpenCode LLM subsession for a second opinion. If the LLM deems the command safe, the command is allowed for that single invocation only — the next run is re-checked by dcg and re-reviewed if blocked again. This uses OpenCode's own model infrastructure — no external API key required. A subsession appears in the TUI during review.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DCG_PLUGIN_REVIEW_ENABLED` | `false` | Set to `true`/`1` to enable LLM review of blocked commands. |
+| `DCG_PLUGIN_REVIEW_MODEL` | _(agent default)_ | Model in `providerID:modelID` format (e.g. `anthropic:claude-sonnet-4`). |
+| `DCG_PLUGIN_REVIEW_AGENT` | `general` | OpenCode agent to use for the review subsession. |
+| `DCG_PLUGIN_REVIEW_TIMEOUT_MS` | `60000` | Timeout in ms for the LLM review. |
+
+If the review fails (session error, timeout, unparseable response), the command is blocked — the safe default is to respect dcg's original denial.
+
+> **Security note — prompt injection.** The review LLM receives conversation context from the parent session (see `DCG_PLUGIN_REVIEW_CONTEXT_MESSAGES`), and that context is partially agent/user-controlled. A sufficiently crafted command, prior message, or rule override can prompt-inject the review LLM into approving a destructive command with no human in the loop. The default is `DCG_PLUGIN_REVIEW_ENABLED=false` for a reason: leave it disabled in any environment where the conversation history is not fully trusted, and treat any "approved by review" command as if you had approved it yourself.
+
+> **Note:** The default agent (`general`) must be enabled in your OpenCode config. If you've disabled it (e.g. `opencode.json` → `agent.general.disable: true`), the review will fail. Either re-enable it, or set `DCG_PLUGIN_REVIEW_AGENT` to an enabled agent (e.g. `build`, or a custom agent you've defined in `.opencode/agents/`).
+
 dcg's own bypass is also respected: if `DCG_BYPASS=1` is set, dcg returns "allow" for everything and commands pass through.
 
 ### Example
@@ -102,6 +120,10 @@ dcg's own bypass is also respected: if `DCG_BYPASS=1` is set, dcg returns "allow
 export DCG_PLUGIN_FAIL_MODE=closed
 export DCG_PLUGIN_TIMEOUT_MS=3000
 export DCG_PLUGIN_TOOLS=bash,task
+
+# Enable LLM review with a specific model
+export DCG_PLUGIN_REVIEW_ENABLED=true
+export DCG_PLUGIN_REVIEW_MODEL=anthropic:claude-sonnet-4
 ```
 
 ## Development
