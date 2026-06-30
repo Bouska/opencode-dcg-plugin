@@ -23,6 +23,8 @@ describe("loadConfig (review)", () => {
     expect(c.review.enabled).toBe(false);
     expect(c.review.agent).toBe("general");
     expect(c.review.timeoutMs).toBe(60000);
+    expect(c.review.contextMessageLimit).toBe(20);
+    expect(c.review.contextMaxChars).toBe(4000);
     expect(c.review.model).toBeUndefined();
   });
 
@@ -53,6 +55,16 @@ describe("loadConfig (review)", () => {
   test("reads DCG_PLUGIN_REVIEW_TIMEOUT_MS", () => {
     expect(loadConfig({ DCG_PLUGIN_REVIEW_TIMEOUT_MS: "30000" }).review.timeoutMs).toBe(30000);
     expect(loadConfig({}).review.timeoutMs).toBe(60000);
+  });
+
+  test("reads DCG_PLUGIN_REVIEW_CONTEXT_MESSAGES", () => {
+    expect(loadConfig({ DCG_PLUGIN_REVIEW_CONTEXT_MESSAGES: "50" }).review.contextMessageLimit).toBe(50);
+    expect(loadConfig({}).review.contextMessageLimit).toBe(20);
+  });
+
+  test("reads DCG_PLUGIN_REVIEW_CONTEXT_MAX_CHARS", () => {
+    expect(loadConfig({ DCG_PLUGIN_REVIEW_CONTEXT_MAX_CHARS: "8000" }).review.contextMaxChars).toBe(8000);
+    expect(loadConfig({}).review.contextMaxChars).toBe(4000);
   });
 });
 
@@ -179,24 +191,24 @@ function makeThrowingClient(): OpencodeSessionClient {
 describe("fetchSessionContext", () => {
   test("returns null when sessionID is undefined", async () => {
     const client = makeMockClient([]);
-    expect(await fetchSessionContext(client, undefined)).toBeNull();
+    expect(await fetchSessionContext(client, undefined, 20, 4000)).toBeNull();
   });
 
   test("returns null when messages fetch throws", async () => {
     const client = makeThrowingClient();
-    expect(await fetchSessionContext(client, "ses_123")).toBeNull();
+    expect(await fetchSessionContext(client, "ses_123", 20, 4000)).toBeNull();
   });
 
   test("returns null when no messages", async () => {
     const client = makeMockClient([]);
-    expect(await fetchSessionContext(client, "ses_123")).toBeNull();
+    expect(await fetchSessionContext(client, "ses_123", 20, 4000)).toBeNull();
   });
 
   test("returns null when messages have no text or tool parts", async () => {
     const client = makeMockClient([
       { info: { role: "user" }, parts: [{ type: "step-start" }] },
     ]);
-    expect(await fetchSessionContext(client, "ses_123")).toBeNull();
+    expect(await fetchSessionContext(client, "ses_123", 20, 4000)).toBeNull();
   });
 
   test("formats user and assistant text messages", async () => {
@@ -204,7 +216,7 @@ describe("fetchSessionContext", () => {
       { info: { role: "user" }, parts: [{ type: "text", text: "clean up build" }] },
       { info: { role: "assistant" }, parts: [{ type: "text", text: "Running rm -rf dist/" }] },
     ]);
-    const ctx = await fetchSessionContext(client, "ses_123");
+    const ctx = await fetchSessionContext(client, "ses_123", 20, 4000);
     expect(ctx).toContain("User: clean up build");
     expect(ctx).toContain("Assistant: Running rm -rf dist/");
   });
@@ -213,7 +225,7 @@ describe("fetchSessionContext", () => {
     const client = makeMockClient([
       { info: { role: "assistant" }, parts: [{ type: "tool", tool: "bash" }] },
     ]);
-    const ctx = await fetchSessionContext(client, "ses_123");
+    const ctx = await fetchSessionContext(client, "ses_123", 20, 4000);
     expect(ctx).toContain("[tool: bash]");
   });
 
@@ -223,11 +235,22 @@ describe("fetchSessionContext", () => {
       { info: { role: "user" }, parts: [{ type: "text", text: longText }] },
       { info: { role: "assistant" }, parts: [{ type: "text", text: longText }] },
     ]);
-    const ctx = await fetchSessionContext(client, "ses_123");
+    const ctx = await fetchSessionContext(client, "ses_123", 20, 4000);
     // Should be under the 4000 char limit
     expect(ctx!.length).toBeLessThan(4500);
     // Should include at least the first message
     expect(ctx).toContain("User:");
+  });
+
+  test("respects custom maxChars", async () => {
+    const client = makeMockClient([
+      { info: { role: "user" }, parts: [{ type: "text", text: "short message one" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "short message two" }] },
+    ]);
+    // With a very small limit, only the first message should fit
+    const ctx = await fetchSessionContext(client, "ses_123", 20, 25);
+    expect(ctx).toContain("User: short message one");
+    expect(ctx).not.toContain("Assistant: short message two");
   });
 
   test("skips messages with no text/tool parts", async () => {
@@ -235,7 +258,7 @@ describe("fetchSessionContext", () => {
       { info: { role: "user" }, parts: [{ type: "step-start" }] },
       { info: { role: "assistant" }, parts: [{ type: "text", text: "hello" }] },
     ]);
-    const ctx = await fetchSessionContext(client, "ses_123");
+    const ctx = await fetchSessionContext(client, "ses_123", 20, 4000);
     expect(ctx).not.toContain("User:");
     expect(ctx).toContain("Assistant: hello");
   });
@@ -319,6 +342,8 @@ const baseConfig: DcgPluginConfig = {
     enabled: true,
     agent: "general",
     timeoutMs: 60000,
+    contextMessageLimit: 20,
+    contextMaxChars: 4000,
   },
 };
 

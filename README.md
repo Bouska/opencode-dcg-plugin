@@ -104,6 +104,8 @@ When enabled, blocked commands are sent to an OpenCode LLM subsession for a seco
 | `DCG_PLUGIN_REVIEW_MODEL` | _(agent default)_ | Model in `providerID:modelID` format (e.g. `anthropic:claude-sonnet-4`). |
 | `DCG_PLUGIN_REVIEW_AGENT` | `general` | OpenCode agent to use for the review subsession. |
 | `DCG_PLUGIN_REVIEW_TIMEOUT_MS` | `60000` | Timeout in ms for the LLM review. |
+| `DCG_PLUGIN_REVIEW_CONTEXT_MESSAGES` | `20` | Max parent session messages to include as context. |
+| `DCG_PLUGIN_REVIEW_CONTEXT_MAX_CHARS` | `4000` | Max characters of conversation context in the prompt. |
 
 If the review fails (session error, timeout, unparseable response), the command is blocked — the safe default is to respect dcg's original denial.
 

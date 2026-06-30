@@ -69,6 +69,10 @@ export interface ReviewConfig {
   agent: string;
   /** Timeout in ms for the LLM review (default: 60000). */
   timeoutMs: number;
+  /** Max number of parent session messages to include as context (default: 20). */
+  contextMessageLimit: number;
+  /** Max characters of conversation context to include in the prompt (default: 4000). */
+  contextMaxChars: number;
 }
 
 /** Result of an LLM review of a blocked command. */
@@ -175,6 +179,8 @@ function parseModel(s: string): { providerID: string; modelID: string } | undefi
  *   DCG_PLUGIN_REVIEW_MODEL  — "providerID:modelID" (e.g., "anthropic:claude-sonnet-4").
  *   DCG_PLUGIN_REVIEW_AGENT  — OpenCode agent for review subsession (default "general").
  *   DCG_PLUGIN_REVIEW_TIMEOUT_MS — timeout for LLM review (default 60000).
+ *   DCG_PLUGIN_REVIEW_CONTEXT_MESSAGES — max parent session messages (default 20).
+ *   DCG_PLUGIN_REVIEW_CONTEXT_MAX_CHARS — max context chars in prompt (default 4000).
  *
  * Note: dcg's own bypass (`DCG_BYPASS=1`) is handled by dcg itself — when set,
  * dcg returns "allow" and the plugin naturally lets the command through.
@@ -192,6 +198,8 @@ export function loadConfig(env: EnvMap = process.env): DcgPluginConfig {
       model: parseModel(envStr(env, "DCG_PLUGIN_REVIEW_MODEL", "")),
       agent: envStr(env, "DCG_PLUGIN_REVIEW_AGENT", "general"),
       timeoutMs: envInt(env, "DCG_PLUGIN_REVIEW_TIMEOUT_MS", 60000),
+      contextMessageLimit: envInt(env, "DCG_PLUGIN_REVIEW_CONTEXT_MESSAGES", 20),
+      contextMaxChars: envInt(env, "DCG_PLUGIN_REVIEW_CONTEXT_MAX_CHARS", 4000),
     },
   };
 }

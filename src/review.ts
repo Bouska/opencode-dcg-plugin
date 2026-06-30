@@ -25,20 +25,19 @@ import type {
 // Context fetching
 // ---------------------------------------------------------------------------
 
-/** Maximum number of recent messages to fetch from the parent session. */
-const CONTEXT_MESSAGE_LIMIT = 20;
-
-/** Maximum total characters of conversation context to include in the prompt. */
-const CONTEXT_MAX_CHARS = 4000;
-
 /**
  * Fetch recent messages from the parent session and format them as a
  * conversation summary so the review LLM has context for its safety judgment.
  * Returns null if the session ID is missing or the fetch fails.
+ *
+ * @param messageLimit  Max messages to fetch from the parent session.
+ * @param maxChars       Max characters of context to include in the prompt.
  */
 export async function fetchSessionContext(
   client: OpencodeSessionClient,
-  sessionID?: string,
+  sessionID: string | undefined,
+  messageLimit: number,
+  maxChars: number,
 ): Promise<string | null> {
   if (!sessionID) return null;
 
@@ -49,7 +48,7 @@ export async function fetchSessionContext(
   try {
     const result = await client.session.messages({
       path: { id: sessionID },
-      query: { limit: CONTEXT_MESSAGE_LIMIT },
+      query: { limit: messageLimit },
     });
     messages = result.data ?? [];
   } catch {
@@ -78,7 +77,7 @@ export async function fetchSessionContext(
     const line = `${role}: ${content}`;
 
     // Stop if we'd exceed the character budget
-    if (totalChars + line.length > CONTEXT_MAX_CHARS) break;
+    if (totalChars + line.length > maxChars) break;
     lines.push(line);
     totalChars += line.length;
   }
@@ -231,7 +230,12 @@ export async function reviewCommand(
   const review = config.review;
 
   // 0. Fetch conversation context from the parent session (non-fatal)
-  const context = await fetchSessionContext(client, sessionID);
+  const context = await fetchSessionContext(
+    client,
+    sessionID,
+    review.contextMessageLimit,
+    review.contextMaxChars,
+  );
   if (config.debug && context) {
     console.warn(
       `[opencode-dcg-plugin] fetched ${context.length} chars of conversation context from session ${sessionID}`,
