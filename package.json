@@ -1,6 +1,6 @@
 {
   "name": "opencode-dcg-plugin",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "OpenCode plugin that blocks destructive shell commands using destructive_command_guard (dcg)",
   "type": "module",
   "main": "dist/opencode-dcg-plugin.js",
