@@ -62,6 +62,16 @@ export interface DcgPluginConfig {
    * then fall through to `failMode`.
    */
   strictMissing: boolean;
+  /**
+   * When true, the user has set `DCG_BYPASS=1` in the environment before
+   * starting OpenCode. The plugin skips dcg entirely and allows all
+   * commands without checking. A model can still prepend `DCG_BYPASS=1`
+   * to a command, but this does not affect `config.dcgBypass`
+   * (init-immutable); the command falls through to dcg, which evaluates
+   * the full command string and denies destructive commands regardless
+   * of any env prefix.
+   */
+  dcgBypass: boolean;
   /** LLM review agent configuration (second-opinion override). */
   review: ReviewConfig;
 }
@@ -228,8 +238,12 @@ function parseModel(s: string): { providerID: string; modelID: string } | undefi
  *   DCG_PLUGIN_REVIEW_CONTEXT_MESSAGES — max parent session messages (default 20).
  *   DCG_PLUGIN_REVIEW_CONTEXT_MAX_CHARS — max context chars in prompt (default 4000).
  *
- * Note: dcg's own bypass (`DCG_BYPASS=1`) is handled by dcg itself — when set,
- * dcg returns "allow" and the plugin naturally lets the command through.
+ * Note: dcg's own bypass (`DCG_BYPASS=1`) is honored only when set in the
+ * environment before OpenCode starts. If a command itself starts with
+ * `DCG_BYPASS=1` (a common model bypass pattern), the command is not
+ * affected by `config.dcgBypass` and falls through to dcg, which
+ * evaluates the full command string and denies the destructive command
+ * regardless of the env prefix.
  */
 export function loadConfig(env: EnvMap = process.env): DcgPluginConfig {
   return {
@@ -240,6 +254,17 @@ export function loadConfig(env: EnvMap = process.env): DcgPluginConfig {
     binary: envStr(env, "DCG_PLUGIN_BINARY", "dcg"),
     debug: envBool(env, "DCG_PLUGIN_DEBUG", false),
     strictMissing: envBool(env, "DCG_PLUGIN_STRICT_MISSING", false),
+    // Read once from the actual environment and snapshot into a boolean.
+    // The model cannot influence this from a child process (bash, task,
+    // etc.), so the captured value is the trusted signal. A model *can*
+    // still prepend `DCG_BYPASS=1` to a command, but dcg evaluates the
+    // full command string and denies the destructive command regardless
+    // of any env prefix (verified: `dcg --robot test "DCG_BYPASS=1 rm -rf /"`
+    // returns `deny` with the dangerous pattern matched at the post-prefix
+    // position). Uses `envBool` (which matches dcg's `parse_env_bool`:
+    // `1|true|yes|y|on`, case-insensitive, trimmed) — no documented
+    // divergence between the two parsers.
+    dcgBypass: envBool(env, "DCG_BYPASS", false),
     review: {
       enabled: envBool(env, "DCG_PLUGIN_REVIEW_ENABLED", false),
       model: parseModel(envStr(env, "DCG_PLUGIN_REVIEW_MODEL", "")),
@@ -366,6 +391,16 @@ export function runDcg(
     try {
       proc = spawn(config.binary, ["--robot", "test", command], {
         stdio: ["ignore", "pipe", "pipe"],
+        // Security note: this re-spreads `process.env` on EVERY dcg spawn,
+        // not at plugin init. The plugin's own `config.dcgBypass` (read
+        // once from `process.env` at init) is init-immutable, but dcg's
+        // own bypass check (`Config::is_bypassed()`) sees `process.env`
+        // per-spawn. This is intentional — it mirrors dcg's per-process
+        // model — but means a user who exports `DCG_BYPASS=1` in a
+        // separate terminal after OpenCode starts will silently activate
+        // dcg's bypass on the next command, even though the plugin's
+        // cached `dcgBypass` flag stays false. The plugin's env-bypass
+        // short-circuit and dcg's bypass are independent code paths.
         env: { ...process.env },
       });
     } catch (err) {
@@ -509,6 +544,20 @@ export async function createPlugin(
 
       const command = output?.args?.command;
       if (typeof command !== "string" || command.trim() === "") return;
+
+      // Env-level bypass: the user has set DCG_BYPASS=1 in the environment
+      // before starting OpenCode. Allow everything without invoking dcg.
+      // (dcg would allow too, but skipping it avoids the per-command spawn
+      // overhead and the async-probe race for the missing-binary notification.)
+      // The captured `config.dcgBypass` is init-immutable: the model cannot
+      // influence it from a child process, so a command starting with
+      // `DCG_BYPASS=1` is just a normal command and falls through to dcg.
+      if (config.dcgBypass) {
+        if (config.debug) {
+          logger("debug", "[opencode-dcg-plugin] DCG_BYPASS=1 in env; allowing without dcg check");
+        }
+        return;
+      }
 
       // Visible notification that the dcg binary is missing.
       // - Default (`strictMissing=false`): throw once, then fall through to

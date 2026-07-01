@@ -82,6 +82,35 @@ describe("loadConfig", () => {
     expect(loadConfig({ DCG_PLUGIN_STRICT_MISSING: "1" }).strictMissing).toBe(true);
     expect(loadConfig({ DCG_PLUGIN_STRICT_MISSING: "false" }).strictMissing).toBe(false);
   });
+
+  test("reads DCG_BYPASS with dcg-compatible truthy values", () => {
+    // Truthy: matches dcg's parse_env_bool (`1|true|yes|y|on`, case-insensitive,
+    // trimmed). Pins the documented contract that the plugin and dcg accept
+    // the same set of values.
+    expect(loadConfig({ DCG_BYPASS: "1" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: "true" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: "TRUE" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: "yes" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: "Yes" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: "y" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: "Y" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: "on" }).dcgBypass).toBe(true);
+    expect(loadConfig({ DCG_BYPASS: " 1 " }).dcgBypass).toBe(true);
+    // Falsy: explicit false values must not bypass.
+    expect(loadConfig({ DCG_BYPASS: "0" }).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: "false" }).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: "no" }).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: "n" }).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: "off" }).dcgBypass).toBe(false);
+    // Empty / unset: not bypass.
+    expect(loadConfig({}).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: "" }).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: " " }).dcgBypass).toBe(false);
+    // Unknown values: not bypass (defense in depth — don't accidentally bypass on garbage).
+    expect(loadConfig({ DCG_BYPASS: "2" }).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: "enable" }).dcgBypass).toBe(false);
+    expect(loadConfig({ DCG_BYPASS: "foo" }).dcgBypass).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -147,6 +176,7 @@ const baseConfig: DcgPluginConfig = {
   binary: "dcg",
   debug: false,
   strictMissing: false,
+  dcgBypass: false,
   review: {
     enabled: false,
     model: undefined,
@@ -338,6 +368,39 @@ describe("createPlugin", () => {
     await expect(
       handler({ tool: "bash" }, { args: { command: "ls" } }),
     ).resolves.toBeUndefined();
+  });
+
+  test("with dcgBypass=true, allows command without calling check", async () => {
+    let called = false;
+    const check: CheckFn = async () => {
+      called = true;
+      return { decision: "deny", rule_id: "test" };
+    };
+    const bypassConfig = { ...baseConfig, dcgBypass: true };
+    const hooks = await createPlugin(bypassConfig, check);
+    const handler = hooks["tool.execute.before"]!;
+    // Even an obviously destructive command is allowed without consulting dcg.
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "rm -rf /" } }),
+    ).resolves.toBeUndefined();
+    expect(called).toBe(false);
+  });
+
+  test("with dcgBypass=true, also allows a command that starts with DCG_BYPASS=1", async () => {
+    // With dcgBypass=true, the env-prefix on the command is irrelevant —
+    // the short-circuit allows the command without consulting dcg.
+    let called = false;
+    const check: CheckFn = async () => {
+      called = true;
+      return { decision: "allow" };
+    };
+    const bypassConfig = { ...baseConfig, dcgBypass: true };
+    const hooks = await createPlugin(bypassConfig, check);
+    const handler = hooks["tool.execute.before"]!;
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "DCG_BYPASS=1 rm -rf /" } }),
+    ).resolves.toBeUndefined();
+    expect(called).toBe(false);
   });
 });
 

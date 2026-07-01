@@ -145,7 +145,9 @@ If the review fails (session error, timeout, unparseable response), the command 
 
 > **Note:** The default agent (`general`) must be enabled in your OpenCode config. If you've disabled it (e.g. `opencode.json` → `agent.general.disable: true`), the review will fail. Either re-enable it, or set `DCG_PLUGIN_REVIEW_AGENT` to an enabled agent (e.g. `build`, or a custom agent you've defined in `.opencode/agents/`).
 
-dcg's own bypass is also respected: if `DCG_BYPASS=1` is set, dcg returns "allow" for everything and commands pass through.
+dcg's own bypass is also respected: if `DCG_BYPASS` is set in your **environment** before starting OpenCode, the plugin skips its own dcg invocation and allows every command. This is a **performance optimization, not a security control** — dcg's per-spawn env re-spread already returns "allow" when `DCG_BYPASS` is set, so the plugin's short-circuit saves the per-command spawn cost (~5–50ms per bash call) without changing what gets blocked. The one scenario where the plugin's short-circuit does something dcg alone cannot: when `dcg` is not installed and `DCG_BYPASS` is set, the plugin passes through silently instead of throwing a missing-binary error. The `DCG_BYPASS` env var must be set on the user side, not on the command side.
+
+> **Note — value contract.** The plugin and dcg recognize the **same** set of values for `DCG_BYPASS` — `1`, `true`, `yes`, `y`, `on` (case-insensitive, trimmed). Falsy values (`0`, `false`, `no`, `n`, `off`) and anything else keep both layers active. There is no documented divergence between the two parsers.
 
 ### Example
 
