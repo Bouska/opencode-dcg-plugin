@@ -21,7 +21,29 @@ dcg --robot test "rm -rf /"   # should print JSON with "decision": "deny"
 
 ## Installation
 
-### Option A — npm (recommended)
+### Option A — `opencode plugin` CLI (recommended)
+
+The official OpenCode CLI installs the plugin and registers it in `opencode.json` in one step:
+
+```bash
+# project-level (writes to ./opencode.json)
+opencode plugin opencode-dcg-plugin
+
+# global (writes to ~/.config/opencode/opencode.json)
+opencode plugin --global opencode-dcg-plugin
+
+# pin a specific version
+opencode plugin opencode-dcg-plugin@0.3.0
+
+# replace an existing install
+opencode plugin --force opencode-dcg-plugin
+```
+
+Under the hood this runs `bun add` into `~/.cache/opencode/node_modules/` and appends `"opencode-dcg-plugin"` to the `plugin` array of your `opencode.json`. The plugin auto-loads on the next OpenCode start.
+
+### Option B — npm (manual fallback)
+
+Use this if the CLI is unavailable or you prefer to manage the config by hand:
 
 ```bash
 # in your project root (or global config)
@@ -37,7 +59,7 @@ Then add to your `opencode.json`:
 }
 ```
 
-### Option B — local file
+### Option C — local file (development only)
 
 Build the plugin and copy the output into your `.opencode/plugins/` directory:
 
@@ -48,7 +70,17 @@ bun install && bun run build
 cp dist/opencode-dcg-plugin.js /path/to/project/.opencode/plugins/dcg-guard.js
 ```
 
-OpenCode auto-loads `.js`/`.ts` files placed in `.opencode/plugins/`. The build produces a single bundled `opencode-dcg-plugin.js` — the LLM review feature is inlined into the same file, so only one copy is needed.
+OpenCode auto-loads `.js`/`.ts` files placed in `.opencode/plugins/`. The build produces a single bundled `opencode-dcg-plugin.js` — the LLM review feature is inlined into the same file, so only one copy is needed. **Do not combine this with Option A or B** — they use separate load paths.
+
+### Uninstalling
+
+The current `opencode plugin` CLI only installs. To remove the plugin:
+
+1. Delete `"opencode-dcg-plugin"` from the `plugin` array in `opencode.json`.
+2. Delete the package cache: `rm -rf ~/.cache/opencode/node_modules/opencode-dcg-plugin`.
+3. If you used Option C, delete the copied file from `.opencode/plugins/`.
+
+> **Note:** A richer subcommand set (`plugin add | list | update | remove`) is tracked in [opencode #7611](https://github.com/anomalyco/opencode/issues/7611).
 
 ## How it works
 
