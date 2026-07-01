@@ -42,7 +42,7 @@ Then add to your `opencode.json`:
 Build the plugin and copy the output into your `.opencode/plugins/` directory:
 
 ```bash
-git clone https://github.com/pablo/opencode-dcg-plugin
+git clone https://github.com/Bouska/opencode-dcg-plugin.git
 cd opencode-dcg-plugin
 bun install && bun run build
 cp dist/index.js  /path/to/project/.opencode/plugins/dcg-guard.js

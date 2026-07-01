@@ -34,9 +34,18 @@
     "shell"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bouska/opencode-dcg-plugin.git"
+  },
+  "bugs": "https://github.com/Bouska/opencode-dcg-plugin/issues",
+  "homepage": "https://github.com/Bouska/opencode-dcg-plugin#readme",
   "engines": {
     "opencode": ">=1.17.0",
     "node": ">=18"
+  },
+  "publishConfig": {
+    "provenance": true
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
