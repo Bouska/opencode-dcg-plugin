@@ -282,3 +282,33 @@ export async function reviewCommand(
 
   return parseReviewResponse(text);
 }
+
+// ---------------------------------------------------------------------------
+// Sentinel default export — see comment below.
+// ---------------------------------------------------------------------------
+
+/**
+ * This file is imported by `./index.ts` (the real plugin entry) and is NOT
+ * meant to be loaded as a standalone plugin. However, when the plugin is
+ * installed via the file-based path (Option B in the README — copy `dist/*.js`
+ * into `.opencode/plugins/`), OpenCode auto-discovers every `.js`/`.ts` file
+ * in that directory as a separate plugin.
+ *
+ * OpenCode's plugin loader (v1.17.12) takes a v1 path when `mod.default` is
+ * a plain object with `server`/`id`; otherwise it falls back to a legacy
+ * path that iterates `Object.values(mod)` and calls every named function
+ * export as a plugin. Without this default export, the legacy fallback would
+ * invoke `buildUserPrompt` (and friends) with `(input, options, ...)` and
+ * crash on the first line that touches `decision.rule_id` — producing a
+ * noisy `level=ERROR` in the OpenCode log.
+ *
+ * Exporting a no-op `PluginModule` shape here satisfies the v1 path. The
+ * legacy fallback is never reached, no hooks are registered from this file,
+ * and the import in `index.ts` is unaffected. The error is non-fatal (the
+ * loader swallows it via `Effect.catch`), but the log noise is misleading
+ * and this fix removes it.
+ */
+export default {
+  id: "opencode-dcg-plugin-review-internal",
+  server: async () => ({}),
+};
