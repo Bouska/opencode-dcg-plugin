@@ -92,7 +92,8 @@ The plugin reads its own behavior from environment variables (all optional):
 | `DCG_PLUGIN_TIMEOUT_MS` | `5000` | Timeout in milliseconds for a single dcg invocation. |
 | `DCG_PLUGIN_TOOLS` | `bash` | Comma-separated tool names to check (e.g. `bash,task`). |
 | `DCG_PLUGIN_BINARY` | `dcg` | Name or full path of the dcg binary. |
-| `DCG_PLUGIN_DEBUG` | `false` | Set to `true`/`1` to log dcg decisions and stderr to the console. |
+| `DCG_PLUGIN_DEBUG` | `false` | Set to `true`/`1` to emit dcg decisions and stderr via the structured logger. Note: this currently surfaces only in OpenCode's logs panel; plugin log delivery via `client.app.log()` has known issues upstream (see [opencode #5793](https://github.com/anomalyco/opencode/issues/5793), [#7301](https://github.com/anomalyco/opencode/issues/7301)). |
+| `DCG_PLUGIN_STRICT_MISSING` | `false` | Set to `true`/`1` to throw on **every** command when the dcg binary is missing. Default: throw once on the first command, then fall through to `failMode` so the user's workflow isn't blocked. Use this in environments where the plugin silently no-opping is unacceptable. **Note:** the dcg probe runs asynchronously at plugin init with a 2s cap; the first command(s) can pass through unchecked if dcg is slow to probe. |
 
 ### LLM review agent (optional)
 
@@ -122,6 +123,9 @@ dcg's own bypass is also respected: if `DCG_BYPASS=1` is set, dcg returns "allow
 export DCG_PLUGIN_FAIL_MODE=closed
 export DCG_PLUGIN_TIMEOUT_MS=3000
 export DCG_PLUGIN_TOOLS=bash,task
+
+# Block every command when dcg is missing (no silent fail-open)
+export DCG_PLUGIN_STRICT_MISSING=true
 
 # Enable LLM review with a specific model
 export DCG_PLUGIN_REVIEW_ENABLED=true

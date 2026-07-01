@@ -1,9 +1,13 @@
 import { describe, test, expect } from "bun:test";
+import { writeFileSync, chmodSync, unlinkSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   loadConfig,
   createPlugin,
   formatBlockMessage,
   runDcg,
+  probeBinary,
   type DcgPluginConfig,
   type DcgDecision,
   type CheckFn,
@@ -64,6 +68,13 @@ describe("loadConfig", () => {
     expect(loadConfig({ DCG_PLUGIN_DEBUG: "1" }).debug).toBe(true);
     expect(loadConfig({ DCG_PLUGIN_DEBUG: "false" }).debug).toBe(false);
     expect(loadConfig({}).debug).toBe(false);
+  });
+
+  test("reads DCG_PLUGIN_STRICT_MISSING", () => {
+    expect(loadConfig({}).strictMissing).toBe(false);
+    expect(loadConfig({ DCG_PLUGIN_STRICT_MISSING: "true" }).strictMissing).toBe(true);
+    expect(loadConfig({ DCG_PLUGIN_STRICT_MISSING: "1" }).strictMissing).toBe(true);
+    expect(loadConfig({ DCG_PLUGIN_STRICT_MISSING: "false" }).strictMissing).toBe(false);
   });
 });
 
@@ -129,6 +140,15 @@ const baseConfig: DcgPluginConfig = {
   tools: ["bash"],
   binary: "dcg",
   debug: false,
+  strictMissing: false,
+  review: {
+    enabled: false,
+    model: undefined,
+    agent: "general",
+    timeoutMs: 60000,
+    contextMessageLimit: 20,
+    contextMaxChars: 4000,
+  },
 };
 
 function makeMockCheck(decision: DcgDecision): CheckFn {
@@ -220,6 +240,99 @@ describe("createPlugin", () => {
     await handler({ tool: "task" }, { args: { command: "echo hi" } });
     expect(called).toBe(true);
   });
+
+  test("throws a clear one-shot error when dcg binary is missing", async () => {
+    const ctx = {
+      binaryProbe: { probed: true, missing: true, binary: "fake-dcg" },
+      logger: () => {},
+    };
+    let calls = 0;
+    const check: CheckFn = async () => {
+      calls++;
+      return { decision: "allow" };
+    };
+    const hooks = await createPlugin(baseConfig, check, undefined, ctx);
+    const handler = hooks["tool.execute.before"]!;
+
+    // First call throws the missing-binary error and does NOT call check.
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "ls" } }),
+    ).rejects.toThrow(/dcg binary "fake-dcg" not available/);
+    expect(calls).toBe(0);
+
+    // Subsequent calls fall through (no re-throw, check runs normally).
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "ls" } }),
+    ).resolves.toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
+  test("does not throw when binary probe has not completed yet", async () => {
+    const ctx = {
+      binaryProbe: { probed: false, missing: false, binary: "dcg" },
+      logger: () => {},
+    };
+    const hooks = await createPlugin(baseConfig, makeMockCheck({ decision: "allow" }), undefined, ctx);
+    const handler = hooks["tool.execute.before"]!;
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "ls" } }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("does not throw when probe says binary is present", async () => {
+    const ctx = {
+      binaryProbe: { probed: true, missing: false, binary: "dcg" },
+      logger: () => {},
+    };
+    const hooks = await createPlugin(baseConfig, makeMockCheck({ decision: "allow" }), undefined, ctx);
+    const handler = hooks["tool.execute.before"]!;
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "ls" } }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("with strictMissing=true, throws on EVERY command when binary is missing", async () => {
+    const ctx = {
+      binaryProbe: { probed: true, missing: true, binary: "fake-dcg" },
+      logger: () => {},
+    };
+    const strictConfig = { ...baseConfig, strictMissing: true };
+    let calls = 0;
+    const check: CheckFn = async () => {
+      calls++;
+      return { decision: "allow" };
+    };
+    const hooks = await createPlugin(strictConfig, check, undefined, ctx);
+    const handler = hooks["tool.execute.before"]!;
+
+    // First call throws.
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "ls" } }),
+    ).rejects.toThrow(/dcg binary "fake-dcg" not available/);
+    // Second call ALSO throws (unlike default behavior).
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "ls -la" } }),
+    ).rejects.toThrow(/dcg binary "fake-dcg" not available/);
+    // Third call still throws.
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "echo hi" } }),
+    ).rejects.toThrow(/dcg binary "fake-dcg" not available/);
+    // The check function is NEVER called while the binary is missing.
+    expect(calls).toBe(0);
+  });
+
+  test("with strictMissing=true, does not throw when binary is present", async () => {
+    const ctx = {
+      binaryProbe: { probed: true, missing: false, binary: "dcg" },
+      logger: () => {},
+    };
+    const strictConfig = { ...baseConfig, strictMissing: true };
+    const hooks = await createPlugin(strictConfig, makeMockCheck({ decision: "allow" }), undefined, ctx);
+    const handler = hooks["tool.execute.before"]!;
+    await expect(
+      handler({ tool: "bash" }, { args: { command: "ls" } }),
+    ).resolves.toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -231,10 +344,8 @@ const dcgAvailable = dcgPath != null;
 
 describe.skipIf(!dcgAvailable)("runDcg integration", () => {
   const config: DcgPluginConfig = {
-    enabled: true,
-    failMode: "open",
+    ...baseConfig,
     timeoutMs: 10000,
-    tools: ["bash"],
     binary: dcgPath ?? "dcg",
   };
 
@@ -283,5 +394,39 @@ describe("runDcg error handling", () => {
     });
     expect(result.decision).toBe("deny");
     expect(result.reason).toContain("not available");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// probeBinary
+// ---------------------------------------------------------------------------
+
+describe("probeBinary", () => {
+  test("returns false for a present, runnable binary", async () => {
+    const missing = await probeBinary(process.execPath, 2000);
+    expect(missing).toBe(false);
+  });
+
+  test("returns true for a nonexistent binary (ENOENT)", async () => {
+    const missing = await probeBinary("/nonexistent/dcg-12345", 2000);
+    expect(missing).toBe(true);
+  });
+
+  test("returns true for a non-executable file (EACCES)", async () => {
+    // Skip when running as root — root bypasses the exec bit and the test
+    // would no longer exercise the EACCES branch.
+    const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    if (isRoot) return;
+
+    const dir = mkdtempSync(join(tmpdir(), "dcg-probe-"));
+    const file = join(dir, "not-executable");
+    writeFileSync(file, "not a binary");
+    chmodSync(file, 0o644);
+    try {
+      const missing = await probeBinary(file, 2000);
+      expect(missing).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

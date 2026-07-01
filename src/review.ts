@@ -19,6 +19,7 @@ import type {
   DcgPluginConfig,
   ReviewResult,
   OpencodeSessionClient,
+  Logger,
 } from "./index.js";
 
 // ---------------------------------------------------------------------------
@@ -226,6 +227,7 @@ export async function reviewCommand(
   config: DcgPluginConfig,
   directory: string,
   sessionID?: string,
+  logger?: Logger,
 ): Promise<ReviewResult> {
   const review = config.review;
 
@@ -237,7 +239,8 @@ export async function reviewCommand(
     review.contextMaxChars,
   );
   if (config.debug && context) {
-    console.warn(
+    logger?.(
+      "debug",
       `[opencode-dcg-plugin] fetched ${context.length} chars of conversation context from session ${sessionID}`,
     );
   }
@@ -274,7 +277,7 @@ export async function reviewCommand(
   const text = result.data?.parts?.find((p) => p.type === "text")?.text ?? "";
 
   if (config.debug) {
-    console.warn(`[opencode-dcg-plugin] review response: ${text.slice(0, 200)}`);
+    logger?.("debug", `[opencode-dcg-plugin] review response: ${text.slice(0, 200)}`);
   }
 
   return parseReviewResponse(text);

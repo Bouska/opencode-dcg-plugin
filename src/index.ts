@@ -53,8 +53,15 @@ export interface DcgPluginConfig {
   tools: string[];
   /** Name or path of the dcg binary. */
   binary: string;
-  /** When true, log dcg stderr and decision details to console.warn. */
+  /** When true, emit dcg stderr and decision details via the structured logger. */
   debug: boolean;
+  /**
+   * When true, throw on EVERY command while the dcg binary is missing
+   * (not just the first). Forces the user to install dcg or disable the
+   * plugin before any bash work can proceed. Default false: throw once,
+   * then fall through to `failMode`.
+   */
+  strictMissing: boolean;
   /** LLM review agent configuration (second-opinion override). */
   review: ReviewConfig;
 }
@@ -111,6 +118,35 @@ export interface OpencodeSessionClient {
         parts: Array<{ type: string; text?: string; tool?: string }>;
       }>;
     }>;
+  };
+}
+
+/** OpenCode client shape used for structured logging. */
+type LogClient = {
+  app?: {
+    log?: (opts: {
+      body: { service: string; level: LogLevel; message: string };
+    }) => Promise<unknown>;
+  };
+};
+
+/** Severity levels for the structured plugin logger. */
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+/**
+ * Structured logger — routes through OpenCode's `client.app.log` when available,
+ * so messages go to the dedicated logs panel (not raw stderr/stdout that pollutes
+ * the TUI). Falls back to a no-op if the client doesn't expose `app.log`.
+ */
+export type Logger = (level: LogLevel, message: string) => void;
+
+/** Build a Logger from an OpenCode client (duck-typed; safe if missing). */
+export function makeLogger(client: unknown): Logger {
+  const log = (client as LogClient | undefined)?.app?.log;
+  if (!log) return () => {};
+  return (level, message) => {
+    // Fire-and-forget: logging must never block the tool-call path.
+    log({ body: { service: "opencode-dcg-plugin", level, message } }).catch(() => {});
   };
 }
 
@@ -174,7 +210,11 @@ function parseModel(s: string): { providerID: string; modelID: string } | undefi
  *   DCG_PLUGIN_TIMEOUT_MS — positive integer (default 5000).
  *   DCG_PLUGIN_TOOLS     — comma-separated tool names (default "bash").
  *   DCG_PLUGIN_BINARY    — path/name of the dcg binary (default "dcg").
- *   DCG_PLUGIN_DEBUG     — "true"/"1" to log dcg stderr and decisions.
+ *   DCG_PLUGIN_DEBUG     — "true"/"1" to emit dcg stderr/decision details via
+ *                          the structured logger (currently a no-op; see README).
+ *   DCG_PLUGIN_STRICT_MISSING — "true"/"1" to throw on EVERY command when dcg
+ *                          is missing (default: throw once, then fall through
+ *                          to failMode).
  *   DCG_PLUGIN_REVIEW_ENABLED — "true"/"1" to enable LLM review of blocked commands.
  *   DCG_PLUGIN_REVIEW_MODEL  — "providerID:modelID" (e.g., "anthropic:claude-sonnet-4").
  *   DCG_PLUGIN_REVIEW_AGENT  — OpenCode agent for review subsession (default "general").
@@ -193,6 +233,7 @@ export function loadConfig(env: EnvMap = process.env): DcgPluginConfig {
     tools: envList(env, "DCG_PLUGIN_TOOLS", ["bash"]),
     binary: envStr(env, "DCG_PLUGIN_BINARY", "dcg"),
     debug: envBool(env, "DCG_PLUGIN_DEBUG", false),
+    strictMissing: envBool(env, "DCG_PLUGIN_STRICT_MISSING", false),
     review: {
       enabled: envBool(env, "DCG_PLUGIN_REVIEW_ENABLED", false),
       model: parseModel(envStr(env, "DCG_PLUGIN_REVIEW_MODEL", "")),
@@ -208,7 +249,63 @@ export function loadConfig(env: EnvMap = process.env): DcgPluginConfig {
 // dcg invocation
 // ---------------------------------------------------------------------------
 
-let missingBinaryWarned = false;
+/**
+ * Plugin init/runtime context shared between the probe and the hook.
+ * Built by `DcgGuard` and passed into `createPlugin`. Holds the dcg probe
+ * result (used to throw a one-shot error when the binary is missing) and
+ * a structured logger (replaces `console.warn` which polluted the TUI).
+ */
+export interface PluginContext {
+  /** Last probe result for the dcg binary. Updated once on init. */
+  binaryProbe: { probed: boolean; missing: boolean; binary: string };
+  /** Structured logger; no-op if OpenCode client doesn't expose `app.log`. */
+  logger: Logger;
+}
+
+/**
+ * Probe whether the dcg binary is reachable. Runs `dcg --version` with a
+ * short hard cap so plugin init stays snappy.
+ *
+ * Resolves `true` (= missing) for: synchronous spawn throw, ENOENT, any other
+ * spawn `error` event (EACCES for a non-executable file, EISDIR for a
+ * directory, ENOTDIR, EPERM, …), and timeout. The `close` handler covers the
+ * "binary exists and ran" case — including non-zero exit, which still means
+ * the binary is on disk and executable.
+ */
+export function probeBinary(binary: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn(binary, ["--version"], { stdio: "ignore" });
+    } catch {
+      resolve(true);
+      return;
+    }
+    const timer = setTimeout(
+      () => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+        // Treat timeout as "missing" so the user gets a clear signal rather
+        // than a hung probe.
+        resolve(true);
+      },
+      Math.min(Math.max(timeoutMs, 100), 2000),
+    );
+    proc.on("error", () => {
+      // Any spawn failure (ENOENT, EACCES, EISDIR, …) means the binary is
+      // not usable as-is; report missing so the throw fires.
+      clearTimeout(timer);
+      resolve(true);
+    });
+    proc.on("close", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
 
 /** Build a decision for error/timeout cases, honoring fail-mode. */
 function errorDecision(kind: string, config: DcgPluginConfig, detail?: string): DcgDecision {
@@ -249,8 +346,15 @@ function tryParseJson(text: string): Record<string, unknown> | null {
  * - Spawn error    → fail-open/closed decision (ENOENT etc.)
  * - Timeout        → fail-open/closed decision
  * - Non-JSON stdout → fail-open/closed decision
+ *
+ * `logger` (optional) routes `debug`-gated output through OpenCode's
+ * `client.app.log` instead of `console.warn` (which pollutes the TUI).
  */
-export function runDcg(command: string, config: DcgPluginConfig): Promise<DcgDecision> {
+export function runDcg(
+  command: string,
+  config: DcgPluginConfig,
+  logger?: Logger,
+): Promise<DcgDecision> {
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
@@ -289,15 +393,8 @@ export function runDcg(command: string, config: DcgPluginConfig): Promise<DcgDec
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (err.code === "ENOENT" && !missingBinaryWarned) {
-        missingBinaryWarned = true;
-        console.warn(
-          `[opencode-dcg-plugin] dcg binary "${config.binary}" not found. ` +
-            `Commands will ${config.failMode === "closed" ? "be blocked" : "pass through unchecked"}. ` +
-            `Install dcg or set DCG_PLUGIN_BINARY. ` +
-            `See https://github.com/Dicklesworthstone/destructive_command_guard`,
-        );
-      }
+      // ENOENT and other spawn errors are surfaced via the plugin-init probe
+      // (one-shot throw in `tool.execute.before`); no raw stderr/console here.
       resolve(errorDecision("spawn", config, err.message));
     });
 
@@ -308,9 +405,10 @@ export function runDcg(command: string, config: DcgPluginConfig): Promise<DcgDec
 
       const parsed = tryParseJson(stdout);
       if (parsed && typeof parsed.decision === "string") {
-        if (config.debug) {
+        if (config.debug && logger) {
           const d = parsed as unknown as DcgDecision;
-          console.warn(
+          logger(
+            "debug",
             `[opencode-dcg-plugin] ${d.decision} — ${command}` +
               (d.rule_id ? ` (${d.rule_id})` : "") +
               (stderr ? `\n  stderr: ${stderr.trim()}` : ""),
@@ -379,9 +477,22 @@ export function formatBlockMessage(command: string, d: DcgDecision): string {
  * If a review function is provided, blocked commands are sent for LLM review
  * before throwing — if the reviewer approves, the command is allowed.
  * Exported for testing; use `DcgGuard` for the real plugin.
+ *
+ * `context` (optional) is the runtime context produced by `DcgGuard`:
+ * the dcg-binary probe result (used for a one-shot "binary missing" throw)
+ * and a structured logger (replaces `console.warn`).
  */
-export async function createPlugin(config: DcgPluginConfig, check: CheckFn, review?: ReviewFn) {
+export async function createPlugin(
+  config: DcgPluginConfig,
+  check: CheckFn,
+  review?: ReviewFn,
+  context?: PluginContext,
+) {
   if (!config.enabled) return {};
+
+  const logger = context?.logger ?? (() => {});
+  const probe = context?.binaryProbe;
+  let missingBinaryNotified = false;
 
   return {
     "tool.execute.before": async (
@@ -393,6 +504,25 @@ export async function createPlugin(config: DcgPluginConfig, check: CheckFn, revi
       const command = output?.args?.command;
       if (typeof command !== "string" || command.trim() === "") return;
 
+      // Visible notification that the dcg binary is missing.
+      // - Default (`strictMissing=false`): throw once, then fall through to
+      //   `failMode` so the user's workflow isn't blocked indefinitely.
+      // - `strictMissing=true`: throw on EVERY command, forcing the user to
+      //   install dcg or disable the plugin before any bash work proceeds.
+      // The probe may not have completed yet on the first call; in that case
+      // skip the throw and let the check proceed (which will also fail-open).
+      if (probe?.probed && probe.missing && (config.strictMissing || !missingBinaryNotified)) {
+        missingBinaryNotified = true;
+        throw new Error(
+          `[opencode-dcg-plugin] dcg binary "${probe.binary}" not available. ` +
+            `All commands will pass through unchecked. ` +
+            `Install: curl -fsSL https://raw.githubusercontent.com/` +
+            `Dicklesworthstone/destructive_command_guard/main/install.sh | bash -s -- --easy-mode. ` +
+            `After install, restart OpenCode to re-enable protection. ` +
+            `Set DCG_PLUGIN_ENABLED=false to silence this and disable the plugin.`,
+        );
+      }
+
       const decision = await check(command, config);
       if (decision && decision.decision === "deny") {
         if (review) {
@@ -400,7 +530,8 @@ export async function createPlugin(config: DcgPluginConfig, check: CheckFn, revi
             const result = await review(command, decision, config, input.sessionID);
             if (result.approved) {
               if (config.debug) {
-                console.warn(
+                logger(
+                  "debug",
                   `[opencode-dcg-plugin] command approved by review agent: ${command}` +
                     (result.reasoning ? ` (${result.reasoning})` : ""),
                 );
@@ -409,7 +540,7 @@ export async function createPlugin(config: DcgPluginConfig, check: CheckFn, revi
             }
           } catch (err) {
             if (config.debug) {
-              console.warn(`[opencode-dcg-plugin] review failed, blocking: ${errMsg(err)}`);
+              logger("debug", `[opencode-dcg-plugin] review failed, blocking: ${errMsg(err)}`);
             }
             // Fall through to throw — safe default is to block
           }
@@ -441,6 +572,28 @@ export const DcgGuard = async (context: {
   worktree: string;
 }) => {
   const config = loadConfig();
+  const logger = makeLogger(context.client);
+
+  // Non-blocking probe so plugin init stays snappy. The hook re-checks
+  // `binaryProbe.probed` before throwing, so a slow probe just delays
+  // the one-shot notification rather than racing the first command.
+  const binaryProbe: PluginContext["binaryProbe"] = {
+    probed: false,
+    missing: false,
+    binary: config.binary,
+  };
+  probeBinary(config.binary, config.timeoutMs)
+    .then((missing) => {
+      binaryProbe.probed = true;
+      binaryProbe.missing = missing;
+    })
+    .catch(() => {
+      // Probe itself failed — treat as missing so the throw fires.
+      binaryProbe.probed = true;
+      binaryProbe.missing = true;
+    });
+
+  const pluginContext: PluginContext = { binaryProbe, logger };
 
   const review: ReviewFn | undefined = config.review.enabled
     ? (command, decision, cfg, sessionID) =>
@@ -451,10 +604,14 @@ export const DcgGuard = async (context: {
           cfg,
           context.directory,
           sessionID,
+          logger,
         )
     : undefined;
 
-  return createPlugin(config, runDcg, review);
+  // Wrap check so the logger is threaded into `runDcg` for debug output.
+  const check: CheckFn = (cmd, cfg) => runDcg(cmd, cfg, logger);
+
+  return createPlugin(config, check, review, pluginContext);
 };
 
 /**
