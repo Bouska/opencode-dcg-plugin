@@ -34,6 +34,12 @@ describe("loadConfig", () => {
     expect(loadConfig({ DCG_PLUGIN_ENABLED: "no" }).enabled).toBe(false);
     expect(loadConfig({ DCG_PLUGIN_ENABLED: "true" }).enabled).toBe(true);
     expect(loadConfig({ DCG_PLUGIN_ENABLED: "1" }).enabled).toBe(true);
+    expect(loadConfig({ DCG_PLUGIN_ENABLED: "yes" }).enabled).toBe(true);
+    expect(loadConfig({ DCG_PLUGIN_ENABLED: "y" }).enabled).toBe(true);
+    expect(loadConfig({ DCG_PLUGIN_ENABLED: "off" }).enabled).toBe(false);
+    expect(loadConfig({ DCG_PLUGIN_ENABLED: "n" }).enabled).toBe(false);
+    expect(loadConfig({ DCG_PLUGIN_ENABLED: " 1 " }).enabled).toBe(true);
+    expect(loadConfig({ DCG_PLUGIN_ENABLED: " " }).enabled).toBe(true);
     expect(loadConfig({ DCG_PLUGIN_ENABLED: "" }).enabled).toBe(true);
   });
 

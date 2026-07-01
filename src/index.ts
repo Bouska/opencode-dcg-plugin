@@ -166,8 +166,14 @@ type EnvMap = Record<string, string | undefined>;
 
 function envBool(env: EnvMap, name: string, fallback: boolean): boolean {
   const v = env[name];
-  if (v === undefined || v === "") return fallback;
-  return /^(1|true|yes|on)$/i.test(v);
+  if (v === undefined) return fallback;
+  // Match dcg's `parse_env_bool` (src/config.rs:4329): trim whitespace,
+  // case-insensitive, accept the same truthy/falsy values. dcg returns
+  // `None` for whitespace-only or unrecognized strings; we map that to
+  // the per-flag fallback so empty env vars preserve the default.
+  const trimmed = v.trim();
+  if (trimmed === "") return fallback;
+  return /^(1|true|yes|y|on)$/i.test(trimmed);
 }
 
 function envInt(env: EnvMap, name: string, fallback: number): number {
