@@ -3,12 +3,12 @@
   "version": "0.2.3",
   "description": "OpenCode plugin that blocks destructive shell commands using destructive_command_guard (dcg)",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/opencode-dcg-plugin.js",
+  "types": "dist/opencode-dcg-plugin.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/opencode-dcg-plugin.d.ts",
+      "import": "./dist/opencode-dcg-plugin.js"
     }
   },
   "files": [
@@ -17,7 +17,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "bun run clean && tsc --emitDeclarationOnly --outDir dist && mv dist/index.d.ts dist/opencode-dcg-plugin.d.ts && bun build src/index.ts --outdir=dist --entry-naming=opencode-dcg-plugin.js --target=node --format=esm --sourcemap=linked && rm dist/review.d.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "clean": "rm -rf dist"

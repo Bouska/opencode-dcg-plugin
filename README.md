@@ -45,11 +45,10 @@ Build the plugin and copy the output into your `.opencode/plugins/` directory:
 git clone https://github.com/Bouska/opencode-dcg-plugin.git
 cd opencode-dcg-plugin
 bun install && bun run build
-cp dist/index.js  /path/to/project/.opencode/plugins/dcg-guard.js
-cp dist/review.js /path/to/project/.opencode/plugins/review.js
+cp dist/opencode-dcg-plugin.js /path/to/project/.opencode/plugins/dcg-guard.js
 ```
 
-OpenCode auto-loads `.js`/`.ts` files placed in `.opencode/plugins/`. Both files are required: `index.js` imports `./review.js` for the optional LLM review feature. (OpenCode will also auto-load `review.js` as a separate plugin entry; it has no `default` export, so it is silently dropped — harmless.)
+OpenCode auto-loads `.js`/`.ts` files placed in `.opencode/plugins/`. The build produces a single bundled `opencode-dcg-plugin.js` — the LLM review feature is inlined into the same file, so only one copy is needed.
 
 ## How it works
 
@@ -138,7 +137,7 @@ export DCG_PLUGIN_REVIEW_MODEL=anthropic:claude-sonnet-4
 bun install          # install dev dependencies
 bun run typecheck    # tsc --noEmit
 bun test             # run tests (includes dcg integration tests if dcg is in PATH)
-bun run build        # compile to dist/
+bun run build        # bundle to dist/opencode-dcg-plugin.js
 ```
 
 ## Acknowledgements
