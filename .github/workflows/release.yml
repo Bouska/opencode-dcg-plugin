@@ -1,0 +1,134 @@
+# .github/workflows/release.yml
+#
+# Triggered when a version tag like v0.2.4 is pushed.
+# - Publishes the package to the public npm registry via OIDC trusted publishing
+#   (no NPM_TOKEN secret required). Provenance is generated automatically.
+# - Creates a GitHub Release with auto-generated notes and the built tarball
+#   attached as a downloadable asset.
+#
+# Prerequisites (one-time):
+#   1. On npmjs.com, add a "Trusted Publisher" for opencode-dcg-plugin pointing
+#      to Bouska / opencode-dcg-plugin / release.yml with "npm publish" allowed.
+#   2. Commit this file at .github/workflows/release.yml
+#
+# Release flow (locally):
+#   npm version patch     # or minor / major
+#   git push --follow-tags
+
+name: Release
+
+on:
+  push:
+    tags:
+      # Matches the default `npm version` tag format (v<semver>).
+      # Add a second line `  - 'v*.*.*-*'` if you also publish prereleases.
+      - 'v*.*.*'
+
+# Don't run stale or duplicate runs of this workflow for the same tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, publish, and release
+    runs-on: ubuntu-latest
+
+    # Minimal permissions:
+    #  - id-token: write  -> required for npm OIDC trusted publishing
+    #  - contents: write  -> required to create the GitHub Release
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+          # Disable the package-manager cache for release builds. We want
+          # npm to resolve a fresh dependency graph from the current lockfile
+          # on every publish, not serve a possibly-stale cache.
+          package-manager-cache: false
+
+      - name: Setup Bun
+        # The project uses `bun test` and `bun.lock`; install bun to match
+        # the maintainer's local dev environment. Pinned to a version range
+        # matching the devDependency so a Bun breaking change can't break
+        # releases silently.
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.x'
+
+      - name: Install dependencies
+        # `bun install --frozen-lockfile` is the bun equivalent of `npm ci`:
+        # it installs exactly what's in bun.lock and refuses to mutate it.
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        # Compiles src/ -> dist/ (gitignored). npm publish will pick this up
+        # via the `files: ["dist", "README.md", "LICENSE"]` field in package.json.
+        run: bun run build
+
+      - name: Verify tag matches package.json version
+        # Guard against the maintainer tagging manually and forgetting to bump
+        # the version, or bumping the version but tagging the wrong commit.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Tag version:    $TAG"
+          echo "package.json:   $PKG_VERSION"
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "::error::Tag ($TAG) does not match package.json version ($PKG_VERSION)."
+            exit 1
+          fi
+
+      - name: Publish to npm
+        # With OIDC trusted publishing, npm:
+        #   1. Detects the ACTIONS_ID_TOKEN_REQUEST_TOKEN / ACTIONS_ID_TOKEN_REQUEST_URL
+        #      environment variables that GitHub Actions exposes.
+        #   2. Exchanges the OIDC token with the npm registry for a short-lived
+        #      publish token scoped to this workflow.
+        #   3. Publishes the package.
+        #   4. Auto-generates provenance (signed by Sigstore) because the repo
+        #      is public and we're publishing from a trusted workflow.
+        # No NPM_TOKEN secret is required.
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ''
+
+      - name: Create tarball for the release asset
+        # `npm pack` produces the exact tarball that `npm publish` just
+        # uploaded to the registry. We attach a copy of it to the GitHub
+        # Release so users can download the same artifact without going
+        # through npm.
+        run: npm pack
+
+      - name: Create GitHub Release
+        # v3 of softprops/action-gh-release requires a Node 24 runtime,
+        # which is what we have above.
+        uses: softprops/action-gh-release@v3
+        with:
+          # Use GitHub's built-in auto-generated release notes.
+          generate_release_notes: true
+          # Mark this release as the latest. Explicit so the default
+          # behaviour doesn't change unexpectedly.
+          make_latest: 'true'
+          # Attach the tarball that `npm pack` just produced.
+          files: opencode-dcg-plugin-*.tgz
+          # Fail the step if the tarball glob matches nothing — a release
+          # without its asset is worse than a failed build.
+          fail_on_unmatched_files: true
+          # Note: `npm publish` is not idempotent — a re-run of this
+          # workflow will fail at the publish step if the version was
+          # already published.
