@@ -183,6 +183,10 @@ This plugin builds on the work of two prior reference implementations:
 
 Both provided the core integration pattern (spawning `dcg`, JSON parsing, throwing to block) that this plugin refines and extends with configurable fail-mode, timeouts, graceful dcg-not-found handling, and TypeScript types.
 
+## Disclaimer
+
+This plugin is not built by the OpenCode team and is not affiliated with OpenCode in any way.
+
 ## License
 
 MIT
